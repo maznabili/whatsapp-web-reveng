@@ -27,6 +27,8 @@ import pyqrcode;
 from utilities import *;
 from whatsapp_binary_reader import whatsappReadBinary;
 
+WHATSAPP_WEB_VERSION="0,4,2081"
+
 reload(sys);
 sys.setdefaultencoding("utf-8");
 
@@ -218,7 +220,7 @@ class WhatsAppWebClient:
 
 
     def connect(self):
-        self.activeWs = websocket.WebSocketApp("wss://w1.web.whatsapp.com/ws",
+        self.activeWs = websocket.WebSocketApp("wss://web.whatsapp.com/ws",
                                                on_message = lambda ws, message: self.onMessage(ws, message),
                                                on_error = lambda ws, error: self.onError(ws, error),
                                                on_open = lambda ws: self.onOpen(ws),
@@ -233,12 +235,12 @@ class WhatsAppWebClient:
         self.loginInfo["clientId"] = base64.b64encode(os.urandom(16));
         messageTag = str(getTimestamp());
         self.messageQueue[messageTag] = { "desc": "_login", "callback": callback };
-        message = messageTag + ',["admin","init",[0,3,2390],["Chromium at ' + datetime.datetime.now().isoformat() + '","Chromium"],"' + self.loginInfo["clientId"] + '",true]';
+        message = messageTag + ',["admin","init",['+ WHATSAPP_WEB_VERSION + '],["Chromium at ' + datetime.datetime.now().isoformat() + '","Chromium"],"' + self.loginInfo["clientId"] + '",true]';
         self.activeWs.send(message);
-        
+
     def restoreSession(self, callback=None):
         messageTag = str(getTimestamp())
-        message = messageTag + ',["admin","init",[0,3,2390],["Chromium at ' + datetime.now().isoformat() + '","Chromium"],"' + self.loginInfo["clientId"] + '",true]'
+        message = messageTag + ',["admin","init",['+ WHATSAPP_WEB_VERSION + '],["Chromium at ' + datetime.now().isoformat() + '","Chromium"],"' + self.loginInfo["clientId"] + '",true]'
         self.activeWs.send(message)
 
         messageTag = str(getTimestamp())

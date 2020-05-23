@@ -6,41 +6,42 @@ const objectToArray = obj => Object.keys(obj).map(k => [k, obj[k]]);
 const indent = (lines, n) => lines.map(l => " ".repeat(n) + l);
 
 async function findAppModules(mods) {
+    const ua = { headers: { "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:75.0) Gecko/20100101 Firefox/75.0" } }
     const WAWebMain = "https://web.whatsapp.com";
-    const index = await request.get(WAWebMain, { headers: { "User-Agent": "Chrome/70 Safari/537 Edge/13" } });
-    const progressPath = index.match(/(?<=\<script src=")\/progress\.[0-9a-z]+\.js(?="\>\<\/script\>)/g);
-    if(progressPath.length === 0)
-        throw "unable to find path of progress.js script";
-    const progress = await request.get(WAWebMain + progressPath[0]);
-    const appPath = progress.match(/(?<={"src":")\/app\.[0-9a-z]+\.js(?=",)/g);
-    if(appPath.length === 0)
-        throw "unable to find path of app.js script";
-    const appModules = acorn.parse(await request.get(WAWebMain + appPath[0])).body[0].expression.arguments[1].properties;
-    return appModules.filter(m => mods.indexOf(m.key.value) != -1);
+    const index = await request.get(WAWebMain, ua);
+    const appPathId = index.match(/data-app="\/app.([0-9a-z]{10,}).js"/)[1]
+    const data = await request.get(WAWebMain + "/app." + appPathId + ".js", ua)
+    const appModules = acorn.parse(data).body[0].expression.argument.arguments[0].properties;
+    return appModules.filter(m => mods.indexOf(m.key.name) != -1);
 }
 
 (async () => {
-    const wantedModules = ['"ebfhaccdcd"', '"djijebjjdh"', '"bfggaciiij"'];
-    const modules = await findAppModules(wantedModules);
-    if(modules.length !== wantedModules.length)
+    const wantedModules = ['bgiachiigg', 'bfifcddbbg', 'bbcaggdbc'];
+    const unsortedModules = await findAppModules(wantedModules);
+    if(unsortedModules.length !== wantedModules.length)
         throw "did not find all wanted modules";
+    // Sort modules so that whatsapp module id changes don't change the order in the output protobuf schema
+    const modules = []
+    for (const mod of wantedModules) {
+        modules.push(unsortedModules.find(node => node.key.name === mod))
+    }
     
     // find aliases of cross references between the wanted modules
     let modulesInfo = {};
     modules.forEach(({key, value}) => {
         const requiringParam = value.params[2].name;
-        modulesInfo[key.value] = { crossRefs: [] };
+        modulesInfo[key.name] = { crossRefs: [] };
         walk.simple(value, {
             VariableDeclarator(node) {
-                if(node.init.type === "CallExpression" && node.init.callee.name === requiringParam && node.init.arguments.length == 1 && wantedModules.indexOf(node.init.arguments[0].value) != -1)
-                    modulesInfo[key.value].crossRefs.push({ alias: node.id.name, module: node.init.arguments[0].value });
+                if(node.init && node.init.type === "CallExpression" && node.init.callee.name === requiringParam && node.init.arguments.length == 1 && wantedModules.indexOf(node.init.arguments[0].value) != -1)
+                    modulesInfo[key.name].crossRefs.push({ alias: node.id.name, module: node.init.arguments[0].value });
             }
         });
     });
 
     // find all identifiers and, for enums, their array of values
     for(const mod of modules) {
-        let modInfo = modulesInfo[mod.key.value];
+        let modInfo = modulesInfo[mod.key.name];
         
         // all identifiers will be initialized to "void 0" (i.e. "undefined") at the start, so capture them here
         walk.ancestor(mod, {
@@ -55,18 +56,19 @@ async function findAppModules(mods) {
                 }
             }
         });
-        
+        const enumAliases = {}
         // enums are defined directly, and both enums and messages get a one-letter alias
         walk.simple(mod, {
+            AssignmentExpression(node) {
+                if (node.left.type === "MemberExpression" && modInfo.identifiers[node.left.property.name]) {
+                    let ident = modInfo.identifiers[node.left.property.name];
+                    ident.alias = node.right.name;
+                    ident.enumValues = enumAliases[ident.alias];
+                }
+            },
             VariableDeclarator(node) {
-                if(node.init.type === "AssignmentExpression" && node.init.left.type === "MemberExpression" && modInfo.identifiers[node.init.left.property.name]) {
-                    let ident = modInfo.identifiers[node.init.left.property.name];
-                    ident.alias = node.id.name;
-                    node = node.init.right;
-
-                    // enums get their array of values directly
-                    if(node.type === "CallExpression" && node.callee.type === "SequenceExpression" && node.arguments.length == 1 && node.arguments[0].type == "ObjectExpression")
-                        ident.enumValues = node.arguments[0].properties.map(p => ({ name: p.key.name, id: p.value.value }));
+                if(node.init && node.init.type === "CallExpression" && node.init.callee.type === "MemberExpression" && node.init.arguments.length === 1 && node.init.arguments[0].type === "ObjectExpression") {
+                    enumAliases[node.id.name] = node.init.arguments[0].properties.map(p => ({ name: p.key.name, id: p.value.value }));
                 }
             }
         });
@@ -74,12 +76,12 @@ async function findAppModules(mods) {
 
     // find the contents for all protobuf messages
     for(const mod of modules) {
-        let modInfo = modulesInfo[mod.key.value];
+        let modInfo = modulesInfo[mod.key.name];
 
         // message specifications are stored in a "_spec" attribute of the respective identifier alias
         walk.simple(mod, {
             AssignmentExpression(node) {
-                if(node.left.type === "MemberExpression" && node.left.property.name === "_spec" && node.right.type === "ObjectExpression") {
+                if(node.left.type === "MemberExpression" && node.left.property.name === "internalSpec" && node.right.type === "ObjectExpression") {
                     let targetIdentName = Object.keys(modInfo.identifiers).find(k => modInfo.identifiers[k].alias == node.left.object.name);
                     if(!targetIdentName) {
                         console.warn(`found message specification for unknown identifier alias: ${node.left.object.name}`);
@@ -119,7 +121,7 @@ async function findAppModules(mods) {
                                 if(crossRef && modulesInfo[crossRef.module].identifiers[elements[2].property.name])
                                     type = elements[2].property.name;
                                 else
-                                    console.warn(`unable to find reference of alias to other module '${elements[2].object.name}' or to message ${elements[2].property.name} of this module` + currLog)
+                                    console.warn(`unable to find reference of alias to other module '${elements[2].object.name}' or to message ${elements[2].property.name} of this module` + currLoc)
                             }
                         }
 
@@ -151,7 +153,7 @@ async function findAppModules(mods) {
 
     // make all enums only one message uses be local to that message
     for(const mod of modules) {
-        let idents = modulesInfo[mod.key.value].identifiers;
+        let idents = modulesInfo[mod.key.name].identifiers;
         let identsArr = objectToArray(idents);
 
         identsArr.filter(i => !!i[1].enumValues).forEach(e => {
@@ -171,8 +173,11 @@ async function findAppModules(mods) {
         });
     }
 
+	console.log('syntax = "proto2";')
+	console.log('package proto;')
+	console.log('')
     for(const mod of modules) {
-        let modInfo = modulesInfo[mod.key.value];
+        let modInfo = modulesInfo[mod.key.name];
         let spacesPerIndentLevel = 4;
 
         // enum stringifying function
@@ -207,8 +212,8 @@ async function findAppModules(mods) {
                 indent([].concat(...members.map(m => stringifyMessageSpecMember(m))), spacesPerIndentLevel),
                 ["}", ""]
             );
-        
-        let lines = [].concat([`syntax = "proto2";`, `package proto;`, ""], ...objectToArray(modInfo.identifiers).map(i => i[1].members ? stringifyMessageSpec(i[0], i[1].members) : stringifyEnum(i[0], i[1].enumValues)));
+
+        let lines = [].concat(...objectToArray(modInfo.identifiers).map(i => i[1].members ? stringifyMessageSpec(i[0], i[1].members) : stringifyEnum(i[0], i[1].enumValues)));
         console.log(lines.join("\n"));
     }
     
